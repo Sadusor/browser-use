@@ -1564,16 +1564,10 @@ class BrowserSession(BaseModel):
 					f'(agent_focus stays on {current_focus}...)'
 				)
 
-		# Resume if waiting for debugger (non-essential, don't let it block connect)
-		if focus:
-			try:
-				await asyncio.wait_for(
-					session.cdp_client.send.Runtime.runIfWaitingForDebugger(session_id=session.session_id),
-					timeout=3.0,
-				)
-			except Exception:
-				pass  # May fail if not waiting, or timeout — either is fine
-
+		# Do not release debugger-paused targets here.
+		# SessionManager._handle_target_attached() is the single release owner and
+		# only calls Runtime.runIfWaitingForDebugger after the Fetch gate is ready.
+		# A second release path here could bypass fail-closed gate installation.
 		return session
 
 	async def set_extra_headers(self, headers: dict[str, str], target_id: TargetID | None = None) -> None:
