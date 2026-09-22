@@ -426,7 +426,7 @@ class SessionManager:
 		# Enable auto-attach for this session's children (do this FIRST, outside lock)
 		try:
 			await self.browser_session._cdp_client_root.send.Target.setAutoAttach(
-				params={'autoAttach': True, 'waitForDebuggerOnStart': False, 'flatten': True}, session_id=session_id
+				params={'autoAttach': True, 'waitForDebuggerOnStart': True, 'flatten': True}, session_id=session_id
 			)
 		except Exception as e:
 			error_str = str(e)
@@ -475,20 +475,30 @@ class SessionManager:
 		# Add to sessions dict
 		self._sessions[session_id] = cdp_session
 
-		# If proxy auth is configured, enable Fetch auth handling on this session
-		# Avoids overwriting Target.attachedToTarget handlers elsewhere
+		# Install the authoritative request gate before releasing this target.
+		# Fetch.requestPaused has one root-client owner registered by BrowserSession.
+		fetch_gate_ready = False
 		try:
 			proxy_cfg = self.browser_session.browser_profile.proxy
 			username = proxy_cfg.username if proxy_cfg else None
 			password = proxy_cfg.password if proxy_cfg else None
-			if username and password:
-				await cdp_session.cdp_client.send.Fetch.enable(
-					params={'handleAuthRequests': True},
-					session_id=cdp_session.session_id,
-				)
-				self.logger.debug(f'[SessionManager] Fetch.enable(handleAuthRequests=True) on session {session_id[:8]}...')
+			await cdp_session.cdp_client.send.Fetch.enable(
+				params={
+					'handleAuthRequests': bool(username and password),
+					'patterns': [{'urlPattern': '*'}],
+				},
+				session_id=cdp_session.session_id,
+			)
+			fetch_gate_ready = True
+			self.logger.debug(
+				f'[SessionManager] Authoritative Fetch gate enabled on session {session_id[:8]}...'
+			)
 		except Exception as e:
-			self.logger.debug(f'[SessionManager] Fetch.enable on attached session failed: {type(e).__name__}: {e}')
+			self.logger.error(
+				f'[SessionManager] Fetch gate failed on {target_type} session {session_id[:8]}...; '
+				f'target will remain paused if debugger-gated: {type(e).__name__}: {e}'
+			)
+
 
 		self.logger.debug(
 			f'[SessionManager] Created session {session_id[:8]}... for target {target_id[:8]}... '
@@ -499,8 +509,13 @@ class SessionManager:
 		if target_type in ('page', 'tab'):
 			await self._enable_page_monitoring(cdp_session)
 
-		# Resume execution if waiting for debugger
+		# Resume only after the request gate is installed. Failure is fail-closed.
 		if waiting_for_debugger:
+			if not fetch_gate_ready:
+				self.logger.error(
+					f'[SessionManager] Not resuming target {target_id[:8]}... because Fetch gate is not ready'
+				)
+				return
 			try:
 				assert self.browser_session._cdp_client_root is not None
 				await self.browser_session._cdp_client_root.send.Runtime.runIfWaitingForDebugger(session_id=session_id)
