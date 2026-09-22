@@ -905,6 +905,17 @@ class BrowserSession(BaseModel):
 	async def on_NavigateToUrlEvent(self, event: NavigateToUrlEvent) -> None:
 		"""Handle navigation requests - core browser functionality."""
 		self.logger.debug(f'[on_NavigateToUrlEvent] Received NavigateToUrlEvent: url={event.url}, new_tab={event.new_tab}')
+
+		# Authoritative pre-navigation gate.
+		#
+		# SecurityWatchdog also listens to NavigateToUrlEvent, but EventBus handlers
+		# may run concurrently. Relying on the watchdog alone can allow the core
+		# navigation handler to issue Page.navigate() before the security handler
+		# rejects the URL. Check the same policy synchronously in the effect-owning
+		# handler before creating/switching tabs or dispatching NavigationStarted.
+		if self._security_watchdog is not None and not self._security_watchdog._is_url_allowed(event.url):
+			self.logger.warning(f'⛔️ Blocking navigation before browser side effect: {event.url}')
+			raise ValueError(f'Navigation to {event.url} blocked by security policy')
 		if not self.agent_focus_target_id:
 			self.logger.warning('Cannot navigate - browser not connected')
 			return
